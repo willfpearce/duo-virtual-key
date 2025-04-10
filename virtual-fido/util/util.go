@@ -5,25 +5,39 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
 	"math/big"
 	"net"
+	"runtime/debug"
+	"strings"
 	"time"
 	"unicode/utf16"
 
 	"github.com/fxamacker/cbor/v2"
 )
 
+func Panic(message string) {
+	panic(fmt.Sprintf("%s\n%s", message, string(debug.Stack())))
+}
+
 func Assert(val bool, message string) {
 	if !val {
-		panic(message)
+		Panic(message)
 	}
 }
 
 func CheckErr(err error, message string) {
 	if err != nil {
-		panic(fmt.Sprintf("ERROR: %v - %v", message, err))
+		Panic(fmt.Sprintf("ERROR: %v - %v", message, err))
 	}
+}
+
+func Try(try func(), catch func(val interface{})) {
+	defer func() {
+		if r := recover(); r != nil {
+			catch(r)
+		}
+	}()
+	try()
 }
 
 func CheckEOF(conn *net.Conn) {
@@ -65,6 +79,12 @@ func ToBE[T any](val T) []byte {
 	return buffer.Bytes()
 }
 
+func FromBE[T any](valBytes []byte) T {
+	buffer := bytes.NewBuffer(valBytes)
+	val := ReadBE[T](buffer)
+	return val
+}
+
 func Write(writer io.Writer, data []byte) {
 	//fmt.Printf("\tWRITE: [%d]byte{%v}\n", len(data), data)
 	_, err := writer.Write(data)
@@ -100,7 +120,7 @@ func SizeOf[T any]() uint8 {
 	return uint8(buffer.Len())
 }
 
-func Flatten[T any](arrays [][]T) []T {
+func Concat[T any](arrays ...[]T) []T {
 	output := make([]T, 0)
 	for _, arr := range arrays {
 		output = append(output, arr...)
@@ -136,58 +156,41 @@ func Delay(f func(), interval int64) {
 	}()
 }
 
-
 func BytesToBigInt(b []byte) *big.Int {
 	return big.NewInt(0).SetBytes(b)
 }
 
 func MarshalCBOR(val interface{}) []byte {
-	data, err := cbor.Marshal(val)
+	encOptions := cbor.CTAP2EncOptions()
+	encMode, err := encOptions.EncMode()
+	CheckErr(err, "Could not get encoding mode")
+	data, err := encMode.Marshal(val)
 	CheckErr(err, "Could not marshal CBOR")
 	return data
 }
 
-
-// Not sure if there is a standard library way to do this,
-// but I couldn't find any at the moment
-type logBuffer struct {
-	buffer *bytes.Buffer
-	output io.Writer
-}
-
-func newLogBuffer() *logBuffer {
-	return &logBuffer{
-		buffer: new(bytes.Buffer),
-		output: nil,
+func CStringToString(data []byte) string {
+	// Converts a null-terminated series of bytes into a Go string
+	i := strings.Index(string(data), "\x00")
+	if i < 0 {
+		// We want to aggressively panic here because it is almost certainly an error
+		panic("No null termination in CString")
 	}
+	return string(data[:i])
 }
 
-func (logBuf *logBuffer) Write(p []byte) (n int, err error) {
-	if logBuf.output == nil {
-		return logBuf.buffer.Write(p)
-	} else {
-		return logBuf.output.Write(p)
-	}
+func TimeoutSwitch(duration int) chan bool {
+	timeoutSwitch := make(chan bool)
+	go func() {
+		time.Sleep(time.Millisecond * time.Duration(duration))
+		timeoutSwitch <- false
+	}()
+	return timeoutSwitch
 }
 
-func (logBuf *logBuffer) setOutput(output io.Writer) {
-	if logBuf.buffer.Len() > 0 {
-		b, _ := io.ReadAll(logBuf.buffer)
-		output.Write(b)
-	}
-	logBuf.output = output
-}
-
-var logOutput *logBuffer = newLogBuffer()
-
-func SetLogOutput(out io.Writer) {
-	logOutput.setOutput(out)
-}
-
-func NewLogger(prefix string, enabled bool) *log.Logger {
-	if enabled {
-		return log.New(logOutput, prefix, 0)
-	} else {
-		return log.New(io.Discard, prefix, 0)
-	}
+func SetTimeout(duration int, f func()) {
+	go func() {
+		time.Sleep(time.Millisecond * time.Duration(duration))
+		f()
+	}()
 }

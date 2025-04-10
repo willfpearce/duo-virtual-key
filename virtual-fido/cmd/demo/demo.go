@@ -1,27 +1,24 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/hex"
 	"fmt"
-	"math/big"
 	"os"
+	"strconv"
 	"strings"
-	"time"
 
 	virtual_fido "github.com/bulwarkid/virtual-fido"
 	"github.com/bulwarkid/virtual-fido/fido_client"
+	"github.com/bulwarkid/virtual-fido/identities"
+	"github.com/bulwarkid/virtual-fido/util"
 	"github.com/spf13/cobra"
 )
 
 var vaultFilename string
 var vaultPassphrase string
 var identityID string
+var verbose bool
 
 func checkErr(err error, message string) {
 	if err != nil {
@@ -40,9 +37,9 @@ func listIdentities(cmd *cobra.Command, args []string) {
 
 func deleteIdentity(cmd *cobra.Command, args []string) {
 	client := createClient()
-	identities := client.Identities()
-	targetIDs := make([]*fido_client.CredentialSource, 0)
-	for _, id := range identities {
+	ids := client.Identities()
+	targetIDs := make([]*identities.CredentialSource, 0)
+	for _, id := range ids {
 		hexString := hex.EncodeToString(id.ID)
 		if strings.HasPrefix(hexString, identityID) {
 			targetIDs = append(targetIDs, &id)
@@ -65,6 +62,35 @@ func deleteIdentity(cmd *cobra.Command, args []string) {
 	}
 }
 
+func enablePIN(cmd *cobra.Command, args []string) {
+	client := createClient()
+	client.EnablePIN()
+	cmd.Println("PIN enabled")
+}
+
+func disablePIN(cmd *cobra.Command, args []string) {
+	client := createClient()
+	client.DisablePIN()
+	cmd.Println("PIN disabled")
+}
+
+var newPIN int
+
+func setPIN(cmd *cobra.Command, args []string) {
+	if newPIN < 0 {
+		cmd.PrintErr("Invalid PIN: PIN must be positive")
+		return
+	}
+	newPINString := strconv.Itoa(newPIN)
+	if len(newPINString) < 4 {
+		cmd.PrintErr("Invalid PIN: PIN must be 4 digits")
+		return
+	}
+	client := createClient()
+	client.SetPIN([]byte(newPINString))
+	cmd.Println("PIN set")
+}
+
 func start(cmd *cobra.Command, args []string) {
 	client := createClient()
 	runServer(client)
@@ -72,35 +98,19 @@ func start(cmd *cobra.Command, args []string) {
 
 func createClient() *fido_client.DefaultFIDOClient {
 	// ALL OF THIS IS INSECURE, FOR TESTING PURPOSES ONLY
-	authority := &x509.Certificate{
-		SerialNumber: big.NewInt(0),
-		Subject: pkix.Name{
-			Organization: []string{"Self-Signed Virtual FIDO"},
-			Country:      []string{"US"},
-		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().AddDate(10, 0, 0),
-		IsCA:                  true,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		BasicConstraintsValid: true,
-	}
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	caPrivateKey, err := identities.CreateCAPrivateKey()
 	checkErr(err, "Could not generate attestation CA private key")
-	authorityCertBytes, err := x509.CreateCertificate(rand.Reader, authority, authority, &privateKey.PublicKey, privateKey)
-	checkErr(err, "Could not generate attestation CA cert bytes")
+	certificateAuthority, err := identities.CreateSelfSignedCA(caPrivateKey)
 	encryptionKey := sha256.Sum256([]byte("test"))
 
 	virtual_fido.SetLogOutput(os.Stdout)
+	if verbose {
+		virtual_fido.SetLogLevel(util.LogLevelTrace)
+	} else {
+		virtual_fido.SetLogLevel(util.LogLevelDebug)
+	}
 	support := ClientSupport{vaultFilename: vaultFilename, vaultPassphrase: vaultPassphrase}
-	return fido_client.NewDefaultClient(authorityCertBytes, privateKey, encryptionKey, &support, &support)
-}
-
-func printUsage(message string) {
-	fmt.Printf("Incorrect Usage: %s\n", message)
-	fmt.Printf("Usage: go run start.go [command] [flags]\n")
-	fmt.Printf("\tCommand: start\n")
-	fmt.Printf("\tCommand: list\n")
+	return fido_client.NewDefaultClient(certificateAuthority, caPrivateKey, encryptionKey, false, &support, &support)
 }
 
 var rootCmd = &cobra.Command{
@@ -112,6 +122,7 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&vaultFilename, "vault", "", "vault.json", "Identity vault filename")
 	rootCmd.PersistentFlags().StringVarP(&vaultPassphrase, "passphrase", "", "passphrase", "Identity vault passphrase")
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
 	rootCmd.MarkFlagRequired("vault")
 	rootCmd.MarkFlagRequired("passphrase")
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
@@ -135,9 +146,35 @@ func init() {
 		Short: "Delete identity in vault",
 		Run:   deleteIdentity,
 	}
-	delete.Flags().StringVarP(&identityID, "identity", "", "", "Identity hash to delete")
+	delete.Flags().StringVar(&identityID, "identity", "", "Identity hash to delete")
 	delete.MarkFlagRequired("identity")
 	rootCmd.AddCommand(delete)
+
+	pinCommand := &cobra.Command{
+		Use:   "pin",
+		Short: "Modify PIN Behavior",
+	}
+	enablePINCommand := &cobra.Command{
+		Use:   "enable",
+		Short: "Enables PIN protection",
+		Run:   enablePIN,
+	}
+	pinCommand.AddCommand(enablePINCommand)
+	disablePINCommand := &cobra.Command{
+		Use:   "disable",
+		Short: "Disables PIN protection",
+		Run:   disablePIN,
+	}
+	pinCommand.AddCommand(disablePINCommand)
+	setPINCommand := &cobra.Command{
+		Use:   "set",
+		Short: "Sets the PIN",
+		Run:   setPIN,
+	}
+	setPINCommand.Flags().IntVar(&newPIN, "pin", -1, "New PIN")
+	setPINCommand.MarkFlagRequired("pin")
+	pinCommand.AddCommand(setPINCommand)
+	rootCmd.AddCommand(pinCommand)
 }
 
 func main() {

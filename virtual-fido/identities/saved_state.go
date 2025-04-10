@@ -1,7 +1,6 @@
-package fido_client
+package identities
 
 import (
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 
@@ -13,12 +12,12 @@ import (
 )
 
 type SavedCredentialSource struct {
-	Type             string                         `json:"type"`
-	ID               []byte                         `json:"id"`
-	PrivateKey       []byte                         `json:"private_key"`
-	RelyingParty     webauthn.PublicKeyCredentialRpEntity    `json:"relying_party"`
+	Type             string                                  `json:"type"`
+	ID               []byte                                  `json:"id"`
+	PrivateKey       []byte                                  `json:"private_key"`
+	RelyingParty     webauthn.PublicKeyCredentialRPEntity    `json:"relying_party"`
 	User             webauthn.PublicKeyCrendentialUserEntity `json:"user"`
-	SignatureCounter int32                          `json:"signature_counter"`
+	SignatureCounter int32                                   `json:"signature_counter"`
 }
 
 type FIDODeviceConfig struct {
@@ -26,6 +25,7 @@ type FIDODeviceConfig struct {
 	AttestationCertificate []byte                  `json:"attestation_certificate"`
 	AttestationPrivateKey  []byte                  `json:"attestation_private_key"`
 	AuthenticationCounter  uint32                  `json:"authentication_counter"`
+	PINEnabled             bool                    `json:"pin_enabled,omitempty"`
 	PINHash                []byte                  `json:"pin_hash,omitempty"`
 	Sources                []SavedCredentialSource `json:"sources"`
 }
@@ -39,12 +39,12 @@ type PassphraseEncryptedBlob struct {
 }
 
 func EncryptWithPassphrase(passphrase string, data []byte) ([]byte, error) {
-	salt := util.Read(rand.Reader, 16)
+	salt := crypto.RandomBytes(16)
 	keyEncryptionKey, err := scrypt.Key([]byte(passphrase), salt, 32768, 8, 1, 32)
 	if err != nil {
 		return nil, fmt.Errorf("Could not create key encryption key: %w", err)
 	}
-	encryptionKey := util.Read(rand.Reader, 32)
+	encryptionKey := crypto.GenerateSymmetricKey()
 	encryptedKey, keyNonce, err := crypto.Encrypt(keyEncryptionKey, encryptionKey)
 	if err != nil {
 		return nil, fmt.Errorf("Could not encrypt key: %w", err)

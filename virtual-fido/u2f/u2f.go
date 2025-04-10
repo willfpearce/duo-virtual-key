@@ -2,18 +2,19 @@ package u2f
 
 import (
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
 	"fmt"
 
+	"github.com/bulwarkid/virtual-fido/cose"
 	"github.com/bulwarkid/virtual-fido/crypto"
-	"github.com/bulwarkid/virtual-fido/fido_client"
 	"github.com/bulwarkid/virtual-fido/util"
 	"github.com/bulwarkid/virtual-fido/webauthn"
 	"github.com/fxamacker/cbor/v2"
 )
 
-var u2fLogger = util.NewLogger("[U2F] ", false)
+var u2fLogger = util.NewLogger("[U2F] ", util.LogLevelDebug)
 
 type U2FCommand uint8
 
@@ -63,11 +64,20 @@ func (header U2FMessageHeader) String() string {
 		header.Param2)
 }
 
-type U2FServer struct {
-	client fido_client.FIDOClient
+type U2FClient interface {
+	SealingEncryptionKey() []byte
+	NewPrivateKey() *ecdsa.PrivateKey
+	NewAuthenticationCounterId() uint32
+	CreateAttestationCertificiate(privateKey *cose.SupportedCOSEPrivateKey) []byte
+	ApproveU2FRegistration(keyHandle *webauthn.KeyHandle) bool
+	ApproveU2FAuthentication(keyHandle *webauthn.KeyHandle) bool
 }
 
-func NewU2FServer(client fido_client.FIDOClient) *U2FServer {
+type U2FServer struct {
+	client U2FClient
+}
+
+func NewU2FServer(client U2FClient) *U2FServer {
 	return &U2FServer{client: client}
 }
 
@@ -97,9 +107,9 @@ func decodeU2FMessage(messageBytes []byte) (U2FMessageHeader, []byte, uint16) {
 	return header, request, responseLength
 }
 
-func (server *U2FServer) HandleU2FMessage(message []byte) []byte {
+func (server *U2FServer) HandleMessage(message []byte) []byte {
 	header, request, responseLength := decodeU2FMessage(message)
-	u2fLogger.Printf("U2F MESSAGE: Header: %s Request: %#v Response Length: %d\n\n", header, request, responseLength)
+	u2fLogger.Printf("MESSAGE: Header: %s Request: %#v Response Length: %d\n\n", header, request, responseLength)
 	var response []byte
 	switch header.Command {
 	case u2f_COMMAND_VERSION:
@@ -111,10 +121,9 @@ func (server *U2FServer) HandleU2FMessage(message []byte) []byte {
 	default:
 		panic(fmt.Sprintf("Invalid U2F Command: %#v", header))
 	}
-	u2fLogger.Printf("U2F RESPONSE: %#v\n\n", response)
+	u2fLogger.Printf("RESPONSE: %#v\n\n", response)
 	return response
 }
-
 
 func (server *U2FServer) sealKeyHandle(keyHandle *webauthn.KeyHandle) []byte {
 	box := crypto.Seal(server.client.SealingEncryptionKey(), util.MarshalCBOR(keyHandle))
@@ -155,12 +164,13 @@ func (server *U2FServer) handleU2FRegister(header U2FMessageHeader, request []by
 		return util.ToBE(u2f_SW_CONDITIONS_NOT_SATISFIED)
 	}
 
-	cert := server.client.CreateAttestationCertificiate(privateKey)
+	cosePrivateKey := &cose.SupportedCOSEPrivateKey{ECDSA: privateKey}
+	cert := server.client.CreateAttestationCertificiate(cosePrivateKey)
 
-	signatureDataBytes := util.Flatten([][]byte{{0}, application, challenge, keyHandle, encodedPublicKey})
-	signature := crypto.Sign(privateKey, signatureDataBytes)
+	signatureDataBytes := util.Concat([]byte{0}, application, challenge, keyHandle, encodedPublicKey)
+	signature := cosePrivateKey.Sign(signatureDataBytes)
 
-	return util.Flatten([][]byte{{0x05}, encodedPublicKey, {uint8(len(keyHandle))}, keyHandle, cert, signature, util.ToBE(u2f_SW_NO_ERROR)})
+	return util.Concat([]byte{0x05}, encodedPublicKey, []byte{uint8(len(keyHandle))}, keyHandle, cert, signature, util.ToBE(u2f_SW_NO_ERROR))
 }
 
 func (server *U2FServer) handleU2FAuthenticate(header U2FMessageHeader, request []byte) []byte {
@@ -182,6 +192,7 @@ func (server *U2FServer) handleU2FAuthenticate(header U2FMessageHeader, request 
 	}
 	privateKey, err := x509.ParseECPrivateKey(keyHandle.PrivateKey)
 	util.CheckErr(err, "Could not decode private key")
+	cosePrivateKey := &cose.SupportedCOSEPrivateKey{ECDSA: privateKey}
 
 	if control == u2f_AUTH_CONTROL_CHECK_ONLY {
 		return util.ToBE(u2f_SW_CONDITIONS_NOT_SATISFIED)
@@ -192,9 +203,9 @@ func (server *U2FServer) handleU2FAuthenticate(header U2FMessageHeader, request 
 			}
 		}
 		counter := server.client.NewAuthenticationCounterId()
-		signatureDataBytes := util.Flatten([][]byte{application, {1}, util.ToBE(counter), challenge})
-		signature := crypto.Sign(privateKey, signatureDataBytes)
-		return util.Flatten([][]byte{{1}, util.ToBE(counter), signature, util.ToBE(u2f_SW_NO_ERROR)})
+		signatureDataBytes := util.Concat(application, []byte{1}, util.ToBE(counter), challenge)
+		signature := cosePrivateKey.Sign(signatureDataBytes)
+		return util.Concat([]byte{1}, util.ToBE(counter), signature, util.ToBE(u2f_SW_NO_ERROR))
 	} else {
 		// No error specific to invalid control byte, so return WRONG_LENGTH to indicate data error
 		return util.ToBE(u2f_SW_WRONG_LENGTH)

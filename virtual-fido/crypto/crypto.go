@@ -1,11 +1,14 @@
 package crypto
 
 import (
+	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"fmt"
 	"math/big"
@@ -13,13 +16,47 @@ import (
 	util "github.com/bulwarkid/virtual-fido/util"
 )
 
+const RSA_NUMBER_OF_BITS = 4096
+
+func GenerateSymmetricKey() []byte {
+	return RandomBytes(32)
+}
+
+func GenerateECDSAKey() *ecdsa.PrivateKey {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	util.CheckErr(err, "Could not generate ecdsa private key")
+	return key
+}
+
+func GenerateEd25519Key() *ed25519.PrivateKey {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	util.CheckErr(err, "Could not generate Ed25519 private key")
+	return &privateKey
+}
+
+func GenerateRSAKey() *rsa.PrivateKey {
+	privateKey, err := rsa.GenerateKey(rand.Reader, RSA_NUMBER_OF_BITS)
+	util.CheckErr(err, "Could not generate RSA private key")
+	return privateKey
+}
+
+func EncodePublicKey(publicKey *ecdsa.PublicKey) []byte {
+	return elliptic.Marshal(elliptic.P256(), publicKey.X, publicKey.Y)
+}
+
+func DecodePublicKey(publicKeyBytes []byte) *ecdsa.PublicKey {
+	x, y := elliptic.Unmarshal(elliptic.P256(), publicKeyBytes)
+	key := ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
+	return &key
+}
+
 func Encrypt(key []byte, data []byte) ([]byte, []byte, error) {
 	// TODO: Handle errors more reliably than panicing
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Could not create device cipher: %w", err)
 	}
-	nonce := util.Read(rand.Reader, 12)
+	nonce := RandomBytes(12)
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Could not create GCM mode: %w", err)
@@ -45,16 +82,37 @@ func Decrypt(key []byte, data []byte, nonce []byte) ([]byte, error) {
 	return decryptedData, nil
 }
 
-func Sign(key *ecdsa.PrivateKey, data []byte) []byte {
+func SignECDSA(key *ecdsa.PrivateKey, data []byte) []byte {
 	hash := sha256.Sum256(data)
 	signature, err := ecdsa.SignASN1(rand.Reader, key, hash[:])
 	util.CheckErr(err, "Could not sign data")
 	return signature
 }
 
-func Verify(key *ecdsa.PublicKey, data []byte, signature []byte) bool {
+func VerifyECDSA(key *ecdsa.PublicKey, data []byte, signature []byte) bool {
 	hash := sha256.Sum256(data)
 	return ecdsa.VerifyASN1(key, hash[:], signature)
+}
+
+func SignEd25519(key *ed25519.PrivateKey, data []byte) []byte {
+	return ed25519.Sign(*key, data)
+}
+
+func VerifyEd25519(publicKey *ed25519.PublicKey, data []byte, signature []byte) bool {
+	return ed25519.Verify(*publicKey, data, signature)
+}
+
+func SignRSA(privateKey *rsa.PrivateKey, data []byte) []byte {
+	digest := sha256.Sum256(data)
+	signature, err := rsa.SignPSS(rand.Reader, privateKey, crypto.SHA256, digest[:], nil)
+	util.CheckErr(err, "Could not sign data with RSA")
+	return signature
+}
+
+func VerifyRSA(publicKey *rsa.PublicKey, data []byte, signature []byte) bool {
+	digest := sha256.Sum256(data)
+	err := rsa.VerifyPSS(publicKey, crypto.SHA256, digest[:], signature, nil)
+	return err == nil
 }
 
 type EncryptedBox struct {
